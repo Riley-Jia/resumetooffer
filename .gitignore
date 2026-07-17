@@ -1,0 +1,15 @@
+.DS_Store
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Frontend build
+frontend/dist/
