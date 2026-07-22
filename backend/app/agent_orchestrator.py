@@ -36,6 +36,7 @@ from app.schemas import (
     ProjectInput,
     ResumeProjectSection,
     SkillGapAnalysisRequest,
+    SkillGapAnalysisResponse,
 )
 from app.skill_gap import run_skill_gap_analysis
 
@@ -51,6 +52,12 @@ class AgentPlanDraft(BaseModel):
     timeline_weeks: int | None = None
     project_notes: str = ""
     execution_plan: list[str] = Field(default_factory=list)
+    run_project_profiling: bool = False
+    run_career_direction: bool = False
+    run_resume_generation: bool = False
+    run_job_ranking: bool = False
+    run_skill_gap_analysis: bool = False
+    run_next_step_plan: bool = False
 
 
 AGENT_PLAN_PROMPT = ChatPromptTemplate.from_messages(
@@ -72,6 +79,24 @@ Graduate Software Engineer, Software Engineer.
 Execution plan should usually include:
 Project Profiling, Career Direction, Resume Generation, Job Ranking,
 Skill Gap Analysis, Next Step Plan.
+
+Before selecting tools, infer the minimum tool set needed for the user's request.
+Set each run_* boolean independently:
+- run_project_profiling: only if the user provides new project/work experience details
+  that should be extracted into a project preview.
+- run_career_direction: if the user asks for career direction recommendations,
+  or if a downstream requested tool needs a target direction and the user did not provide one.
+- run_resume_generation: if the user asks to generate, rewrite, update, or tailor a resume.
+- run_job_ranking: if the user asks for job recommendations, job ranking, applications,
+  or matching roles.
+- run_skill_gap_analysis: if the user asks for gaps, missing skills, fit analysis,
+  or comparison against jobs.
+- run_next_step_plan: if the user asks for a learning plan, next steps, preparation plan,
+  or if skill gap analysis is requested.
+
+If the user only asks to generate a resume for a specified direction, run only
+Resume Generation and any cheap prerequisite parsing. Do not run Job Ranking,
+Skill Gap Analysis, or Next Step Plan.
 """,
         ),
         ("human", "{message}"),
@@ -181,13 +206,15 @@ def fallback_goal(message: str) -> AgentPlanDraft:
     if weeks_match:
         timeline_weeks = int(weeks_match.group(1))
 
+    tool_plan = infer_tool_plan_from_message(message, bool(target_direction))
     return AgentPlanDraft(
         target_direction=target_direction,
         locations=locations,
         levels=levels,
         role_families=role_families,
         timeline_weeks=timeline_weeks,
-        execution_plan=default_execution_plan(),
+        execution_plan=execution_plan_from_tools(tool_plan),
+        **tool_plan,
     )
 
 
@@ -203,7 +230,95 @@ def default_execution_plan() -> list[str]:
     ]
 
 
-def canonicalize_goal(draft: AgentPlanDraft) -> AgentPlanDraft:
+def infer_tool_plan_from_message(message: str, has_target_direction: bool = False) -> dict[str, bool]:
+    lowered = message.lower()
+    wants_resume = bool(re.search(r"生成.*简历|简历|resume|cv", lowered))
+    wants_jobs = bool(re.search(r"推荐岗位|岗位推荐|岗位|职位|投递|申请|job|jobs|ranking|match", lowered))
+    wants_gap = bool(re.search(r"差距|gap|缺口|missing|fit|匹配度", lowered))
+    wants_plan = bool(re.search(r"学习计划|下一步|准备计划|计划|next step|roadmap", lowered))
+    wants_direction = bool(re.search(r"职业方向|方向推荐|适合.*方向|career direction", lowered))
+    has_project_notes = bool(
+        re.search(r"项目|系统|平台|工具|应用|网站|Agent|实习|工作经历|技术栈|负责|实现|开发", message, flags=re.IGNORECASE)
+        and not wants_resume
+        and not wants_jobs
+        and not wants_gap
+        and not wants_plan
+    )
+
+    if not any([wants_resume, wants_jobs, wants_gap, wants_plan, wants_direction, has_project_notes]):
+        wants_direction = True
+        wants_resume = True
+        wants_jobs = True
+        wants_gap = True
+        wants_plan = True
+
+    return {
+        "run_project_profiling": has_project_notes,
+        "run_career_direction": wants_direction or ((wants_resume or wants_jobs or wants_gap) and not has_target_direction),
+        "run_resume_generation": wants_resume,
+        "run_job_ranking": wants_jobs or wants_gap,
+        "run_skill_gap_analysis": wants_gap,
+        "run_next_step_plan": wants_plan or wants_gap,
+    }
+
+
+def execution_plan_from_tools(tool_plan: dict[str, bool]) -> list[str]:
+    plan = ["理解用户目标"]
+    if tool_plan.get("run_project_profiling"):
+        plan.append("Project Profiling: 抽取用户提供的新项目/工作经历预览")
+    if tool_plan.get("run_career_direction"):
+        plan.append("Career Direction: 生成或更新职业方向评分")
+    if tool_plan.get("run_resume_generation"):
+        plan.append("Resume Generation: 生成目标方向简历")
+    if tool_plan.get("run_job_ranking"):
+        plan.append("Job Ranking: 召回并排序岗位")
+    if tool_plan.get("run_skill_gap_analysis"):
+        plan.append("Skill Gap Analysis: 分析岗位技能差距")
+    if tool_plan.get("run_next_step_plan"):
+        plan.append("Next Step Plan: 生成下一步计划")
+    return plan
+
+
+def normalize_tool_plan(draft: AgentPlanDraft, message: str = "") -> AgentPlanDraft:
+    inferred = infer_tool_plan_from_message(message, bool(draft.target_direction))
+    message_inferred = None
+    if not any(
+        [
+            draft.run_project_profiling,
+            draft.run_career_direction,
+            draft.run_resume_generation,
+            draft.run_job_ranking,
+            draft.run_skill_gap_analysis,
+            draft.run_next_step_plan,
+        ]
+    ):
+        message_inferred = inferred
+
+    if message_inferred:
+        for field, value in message_inferred.items():
+            setattr(draft, field, value)
+
+    if (draft.run_resume_generation or draft.run_job_ranking or draft.run_skill_gap_analysis) and not draft.target_direction:
+        draft.run_career_direction = True
+    if draft.run_skill_gap_analysis:
+        draft.run_job_ranking = True
+    if draft.run_next_step_plan and draft.run_skill_gap_analysis:
+        draft.run_job_ranking = True
+
+    draft.execution_plan = execution_plan_from_tools(
+        {
+            "run_project_profiling": draft.run_project_profiling,
+            "run_career_direction": draft.run_career_direction,
+            "run_resume_generation": draft.run_resume_generation,
+            "run_job_ranking": draft.run_job_ranking,
+            "run_skill_gap_analysis": draft.run_skill_gap_analysis,
+            "run_next_step_plan": draft.run_next_step_plan,
+        }
+    )
+    return draft
+
+
+def canonicalize_goal(draft: AgentPlanDraft, message: str = "") -> AgentPlanDraft:
     combined_text = " ".join(
         [
             draft.target_direction,
@@ -251,7 +366,7 @@ def canonicalize_goal(draft: AgentPlanDraft) -> AgentPlanDraft:
     draft.target_direction = canonical_direction
     draft.role_families = canonical_families
     draft.levels = canonical_levels
-    return draft
+    return normalize_tool_plan(draft, message)
 
 
 def parse_agent_goal(message: str) -> AgentPlanDraft:
@@ -269,10 +384,10 @@ def parse_agent_goal(message: str) -> AgentPlanDraft:
         )
         if not draft.execution_plan:
             draft.execution_plan = default_execution_plan()
-        return canonicalize_goal(draft)
+        return canonicalize_goal(draft, message)
     except Exception:
         log_model_fallback("agent_orchestrator", AGENT_ORCHESTRATOR_MODEL, "regex_goal_parser")
-        return canonicalize_goal(fallback_goal(message))
+        return canonicalize_goal(fallback_goal(message), message)
 
 
 def save_career_directions(
@@ -341,7 +456,7 @@ def run_career_agent(
     ]
 
     project_preview: ProjectInput | None = None
-    if goal.project_notes.strip():
+    if draft.run_project_profiling and goal.project_notes.strip():
         project_preview = profile_project_text(goal.project_notes)
         steps.append(
             AgentExecutionStep(
@@ -355,19 +470,34 @@ def run_career_agent(
             AgentExecutionStep(
                 name="Project Profiling",
                 status="skipped",
-                detail="本次输入没有包含新的项目经历描述，沿用数据库中已有项目。",
+                detail=(
+                    "本次输入没有包含新的项目经历描述，沿用数据库中已有项目。"
+                    if draft.run_project_profiling
+                    else "本次目标不需要 Project Profiling，已跳过。"
+                ),
             )
         )
 
-    recommendations = recommend_career_directions(profile, projects)
-    career_snapshot = save_career_directions(db, recommendations)
-    steps.append(
-        AgentExecutionStep(
-            name="Career Direction",
-            status="completed",
-            detail=f"已生成并覆盖保存 {len(recommendations)} 个职业方向评分。",
+    recommendations: list[CareerDirectionRecommendation] = []
+    career_snapshot = CareerDirectionsSnapshot()
+    if draft.run_career_direction:
+        recommendations = recommend_career_directions(profile, projects)
+        career_snapshot = save_career_directions(db, recommendations)
+        steps.append(
+            AgentExecutionStep(
+                name="Career Direction",
+                status="completed",
+                detail=f"已生成并覆盖保存 {len(recommendations)} 个职业方向评分。",
+            )
         )
-    )
+    else:
+        steps.append(
+            AgentExecutionStep(
+                name="Career Direction",
+                status="skipped",
+                detail="本次目标不需要职业方向推荐，已跳过。",
+            )
+        )
 
     target_direction = goal.target_direction
     if not target_direction and recommendations:
@@ -375,7 +505,7 @@ def run_career_agent(
         goal.target_direction = target_direction
 
     generated_resume: GeneratedResume | None = None
-    if target_direction:
+    if draft.run_resume_generation and target_direction:
         generated_resume = save_generated_resume(
             db,
             generate_resume_content(profile, projects, target_direction),
@@ -392,65 +522,110 @@ def run_career_agent(
             AgentExecutionStep(
                 name="Resume Generation",
                 status="skipped",
-                detail="没有可用目标方向，未生成简历。",
+                detail=(
+                    "没有可用目标方向，未生成简历。"
+                    if draft.run_resume_generation
+                    else "本次目标不需要生成简历，已跳过。"
+                ),
             )
         )
 
-    jobs = [
-        job_from_model(job)
-        for job in db.query(JobModel)
-        .filter(JobModel.status == "active")
-        .order_by(JobModel.role_family, JobModel.location, JobModel.title)
-        .all()
-    ]
-    resume_data = generated_resume.model_dump() if generated_resume else None
-    job_request = JobMatchRequest(
-        target_direction=target_direction,
-        locations=goal.locations,
-        levels=goal.levels,
-        role_families=goal.role_families,
-        status="active",
-        top_k=10,
-        llm_candidate_count=20,
-    )
-    job_matches = match_jobs(profile, projects, resume_data, jobs, job_request)
-    requested_locations = {location.lower() for location in goal.locations}
-    returned_locations = {match.job.location.lower() for match in job_matches.matches}
-    location_detail = ""
-    if requested_locations and job_matches.matches and not (requested_locations & returned_locations):
-        location_detail = " 未找到目标城市岗位，已按职级和方向回退到其它城市岗位。"
-    steps.append(
-        AgentExecutionStep(
-            name="Job Ranking",
-            status="completed",
-            detail=f"已完成岗位召回和排序，返回 Top{len(job_matches.matches)}。{location_detail}",
-        )
-    )
-
-    skill_gap = run_skill_gap_analysis(
-        SkillGapAnalysisRequest(
-            jobs=[match.job for match in job_matches.matches[:3]],
-            top_matches=job_matches.matches[:3],
-            user_skills=profile.skills,
+    job_matches = JobMatchResponse()
+    if draft.run_job_ranking:
+        jobs = [
+            job_from_model(job)
+            for job in db.query(JobModel)
+            .filter(JobModel.status == "active")
+            .order_by(JobModel.role_family, JobModel.location, JobModel.title)
+            .all()
+        ]
+        resume_data = generated_resume.model_dump() if generated_resume else None
+        job_request = JobMatchRequest(
             target_direction=target_direction,
-        ),
-        profile,
-        projects,
-    )
-    steps.append(
-        AgentExecutionStep(
-            name="Skill Gap Analysis",
-            status="completed",
-            detail=f"Gap severity: {skill_gap.gap_severity}。",
+            locations=goal.locations,
+            levels=goal.levels,
+            role_families=goal.role_families,
+            status="active",
+            top_k=10,
+            llm_candidate_count=20,
         )
-    )
-    steps.append(
-        AgentExecutionStep(
-            name="Next Step Plan",
-            status="completed",
-            detail=f"已生成 {len(skill_gap.next_step_plan)} 周下一步计划。",
+        job_matches = match_jobs(profile, projects, resume_data, jobs, job_request)
+        requested_locations = {location.lower() for location in goal.locations}
+        returned_locations = {match.job.location.lower() for match in job_matches.matches}
+        location_detail = ""
+        if requested_locations and job_matches.matches and not (requested_locations & returned_locations):
+            location_detail = " 未找到目标城市岗位，已按职级和方向回退到其它城市岗位。"
+        steps.append(
+            AgentExecutionStep(
+                name="Job Ranking",
+                status="completed",
+                detail=f"已完成岗位召回和排序，返回 Top{len(job_matches.matches)}。{location_detail}",
+            )
         )
-    )
+    else:
+        steps.append(
+            AgentExecutionStep(
+                name="Job Ranking",
+                status="skipped",
+                detail="本次目标不需要岗位召回和排序，已跳过。",
+            )
+        )
+
+    skill_gap = SkillGapAnalysisResponse()
+    if draft.run_skill_gap_analysis:
+        skill_gap = run_skill_gap_analysis(
+            SkillGapAnalysisRequest(
+                jobs=[match.job for match in job_matches.matches[:3]],
+                top_matches=job_matches.matches[:3],
+                user_skills=profile.skills,
+                target_direction=target_direction,
+            ),
+            profile,
+            projects,
+        )
+        steps.append(
+            AgentExecutionStep(
+                name="Skill Gap Analysis",
+                status="completed",
+                detail=f"Gap severity: {skill_gap.gap_severity}。",
+            )
+        )
+    else:
+        steps.append(
+            AgentExecutionStep(
+                name="Skill Gap Analysis",
+                status="skipped",
+                detail="本次目标不需要技能差距分析，已跳过。",
+            )
+        )
+
+    if draft.run_next_step_plan:
+        if not draft.run_skill_gap_analysis:
+            skill_gap = run_skill_gap_analysis(
+                SkillGapAnalysisRequest(
+                    jobs=[match.job for match in job_matches.matches[:3]],
+                    top_matches=job_matches.matches[:3],
+                    user_skills=profile.skills,
+                    target_direction=target_direction,
+                ),
+                profile,
+                projects,
+            )
+        steps.append(
+            AgentExecutionStep(
+                name="Next Step Plan",
+                status="completed",
+                detail=f"已生成 {len(skill_gap.next_step_plan)} 周下一步计划。",
+            )
+        )
+    else:
+        steps.append(
+            AgentExecutionStep(
+                name="Next Step Plan",
+                status="skipped",
+                detail="本次目标不需要下一步计划，已跳过。",
+            )
+        )
 
     response = CareerAgentResponse(
         user_message=request.message,
@@ -470,6 +645,12 @@ def run_career_agent(
             "job_match_count": len(job_matches.matches),
             "gap_severity": skill_gap.gap_severity,
             "timeline_weeks": goal.timeline_weeks,
+            "run_project_profiling": draft.run_project_profiling,
+            "run_career_direction": draft.run_career_direction,
+            "run_resume_generation": draft.run_resume_generation,
+            "run_job_ranking": draft.run_job_ranking,
+            "run_skill_gap_analysis": draft.run_skill_gap_analysis,
+            "run_next_step_plan": draft.run_next_step_plan,
         },
     )
     agent_run_id = str(uuid4())

@@ -65,7 +65,7 @@ Known project titles:
 def fallback_route(message: str) -> InputRouterResponse:
     normalized = message.lower()
     job_posting_terms = ["招聘", "职位描述", "岗位职责", "任职要求", "jd", "hiring", "requirements"]
-    career_command_terms = ["生成简历", "推荐岗位", "分析差距", "学习计划", "投", "申请", "run agent"]
+    career_command_terms = ["生成简历", "简历", "推荐岗位", "岗位推荐", "推荐", "岗位", "分析差距", "学习计划", "投", "申请", "run agent"]
     profile_terms = [
         "教育经历",
         "学历",
@@ -166,7 +166,7 @@ def route_user_input(
     projects: list[Project],
 ) -> InputRouterResponse:
     def correct_route(response: InputRouterResponse) -> InputRouterResponse:
-        has_career_command = bool(re.search(r"生成简历|推荐岗位|分析差距|学习计划|投|申请", message))
+        has_career_command = bool(re.search(r"生成.*简历|简历|推荐.*岗位|岗位推荐|岗位|分析差距|学习计划|投|申请", message))
         has_profile_or_project_info = bool(
             re.search(r"教育经历|学历|毕业|就读|大学|本科|硕士|博士|实习|工作经历|技能|技术栈|location|项目|系统|平台|工具|应用|网站|Agent", message)
         )
