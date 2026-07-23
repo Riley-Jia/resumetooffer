@@ -1,8 +1,11 @@
 import hashlib
 import logging
 import math
+import os
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,6 +19,10 @@ from app.schemas import Job, JobMatchRequest, JobMatchResponse, JobMatchResult, 
 
 
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
+CHROMA_COLLECTION_NAME = "job_matching_persistent"
+CHROMA_PERSIST_DIR = Path(os.getenv("JOB_CHROMA_PERSIST_DIR", "backend/data/chroma_jobs"))
+BM25_INDEX_CACHE: dict[str, "BM25Index"] = {}
 
 DEFAULT_LEVELS = ["Intern", "Graduate", "Junior", "实习", "校招", "初级", "应届", "1年以内"]
 DEFAULT_ROLE_FAMILIES = ["Backend", "AI Application", "Graduate Software Engineer", "Software Engineer"]
@@ -94,6 +101,23 @@ Shortlisted jobs:
 )
 
 
+@dataclass(frozen=True)
+class RetrievalHit:
+    job_id: str
+    score: float
+    source: str
+
+
+@dataclass
+class BM25Index:
+    corpus_key: str
+    job_ids: list[str]
+    documents: list[list[str]]
+    doc_freq: Counter[str]
+    average_length: float
+    document_lengths: dict[str, int]
+
+
 def normalize(value: str) -> str:
     return value.lower().replace("_", " ").replace("-", " ").strip()
 
@@ -105,19 +129,22 @@ def tokenize(text: str) -> list[str]:
     return words + phrase_tokens
 
 
+def build_job_document(job: Job) -> str:
+    sections = [
+        ("title", job.title),
+        ("company", job.company),
+        ("location", job.location),
+        ("level", job.level),
+        ("role_family", job.role_family),
+        ("required_skills", ", ".join(job.required_skills)),
+        ("nice_to_have_skills", ", ".join(job.nice_to_have_skills)),
+        ("description", job.description),
+    ]
+    return "\n".join(f"{label}: {value}" for label, value in sections if value)
+
+
 def job_document(job: Job) -> str:
-    return " ".join(
-        [
-            job.title,
-            job.company,
-            job.location,
-            job.level,
-            job.role_family,
-            " ".join(job.required_skills),
-            " ".join(job.nice_to_have_skills),
-            job.description,
-        ]
-    )
+    return build_job_document(job)
 
 
 def user_document(
@@ -247,32 +274,81 @@ def role_families_for_direction(target_direction: str) -> list[str]:
     return sorted(families) if families else DEFAULT_ROLE_FAMILIES
 
 
-def bm25_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[str]:
-    documents = [tokenize(job_document(job)) for job in jobs]
-    query_terms = tokenize(query)
-    if not documents or not query_terms:
-        return []
+def jobs_corpus_key(jobs: list[Job]) -> str:
+    fingerprint = "|".join(
+        f"{job.id}:{hashlib.md5(job_document(job).encode('utf-8'), usedforsecurity=False).hexdigest()}"
+        for job in sorted(jobs, key=lambda item: item.id)
+    )
+    return hashlib.md5(fingerprint.encode("utf-8"), usedforsecurity=False).hexdigest()
 
+
+def build_bm25_index(jobs: list[Job]) -> BM25Index:
+    corpus_key = jobs_corpus_key(jobs)
+    documents = [tokenize(job_document(job)) for job in jobs]
     doc_freq: Counter[str] = Counter()
     for document in documents:
         doc_freq.update(set(document))
 
-    average_length = sum(len(document) for document in documents) / len(documents)
+    average_length = sum(len(document) for document in documents) / len(documents) if documents else 0.0
+    return BM25Index(
+        corpus_key=corpus_key,
+        job_ids=[job.id for job in jobs],
+        documents=documents,
+        doc_freq=doc_freq,
+        average_length=average_length,
+        document_lengths={job.id: len(document) for job, document in zip(jobs, documents, strict=True)},
+    )
+
+
+def get_bm25_index(jobs: list[Job]) -> BM25Index:
+    corpus_key = jobs_corpus_key(jobs)
+    cached = BM25_INDEX_CACHE.get(corpus_key)
+    if cached:
+        return cached
+
+    index = build_bm25_index(jobs)
+    BM25_INDEX_CACHE.clear()
+    BM25_INDEX_CACHE[corpus_key] = index
+    return index
+
+
+def normalize_scores(scored: list[tuple[float, str]]) -> list[RetrievalHit]:
+    if not scored:
+        return []
+    positive = [(score, job_id) for score, job_id in scored if score > 0]
+    if not positive:
+        return []
+    max_score = max(score for score, _ in positive)
+    if max_score <= 0:
+        return []
+    return [
+        RetrievalHit(job_id=job_id, score=round(score / max_score, 4), source="")
+        for score, job_id in positive
+    ]
+
+
+def bm25_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[RetrievalHit]:
+    index = get_bm25_index(jobs)
+    query_terms = tokenize(query)
+    if not index.documents or not query_terms or index.average_length == 0:
+        return []
+
     k1 = 1.5
     b = 0.75
     scored: list[tuple[float, str]] = []
-    for job, document in zip(jobs, documents, strict=True):
+    for job_id, document in zip(index.job_ids, index.documents, strict=True):
         term_counts = Counter(document)
         score = 0.0
         for term in query_terms:
             if term not in term_counts:
                 continue
-            idf = math.log(1 + (len(documents) - doc_freq[term] + 0.5) / (doc_freq[term] + 0.5))
+            idf = math.log(1 + (len(index.documents) - index.doc_freq[term] + 0.5) / (index.doc_freq[term] + 0.5))
             tf = term_counts[term]
-            score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * len(document) / average_length))
-        scored.append((score, job.id))
+            score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * len(document) / index.average_length))
+        scored.append((score, job_id))
 
-    return [job_id for score, job_id in sorted(scored, reverse=True)[:top_n] if score > 0]
+    hits = normalize_scores(sorted(scored, reverse=True)[:top_n])
+    return [RetrievalHit(job_id=hit.job_id, score=hit.score, source="bm25") for hit in hits]
 
 
 def hash_embedding(text: str, dimensions: int = 128) -> list[float]:
@@ -293,13 +369,14 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right, strict=True))
 
 
-def local_vector_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[str]:
+def local_vector_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[RetrievalHit]:
     query_vector = hash_embedding(query)
     scored = [
         (cosine_similarity(query_vector, hash_embedding(job_document(job))), job.id)
         for job in jobs
     ]
-    return [job_id for score, job_id in sorted(scored, reverse=True)[:top_n] if score > 0]
+    hits = normalize_scores(sorted(scored, reverse=True)[:top_n])
+    return [RetrievalHit(job_id=hit.job_id, score=hit.score, source="local_vector") for hit in hits]
 
 
 class HashEmbeddingFunction:
@@ -307,40 +384,90 @@ class HashEmbeddingFunction:
         return [hash_embedding(item) for item in input]
 
 
-def chroma_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[str]:
-    try:
-        import chromadb
-        from chromadb.config import Settings
+def job_document_hash(job: Job) -> str:
+    return hashlib.md5(job_document(job).encode("utf-8"), usedforsecurity=False).hexdigest()
 
-        client = chromadb.Client(Settings(anonymized_telemetry=False))
-        collection = client.get_or_create_collection(
-            "job_matching_ephemeral",
-            embedding_function=HashEmbeddingFunction(),
+
+def ensure_chroma_job_index(jobs: list[Job]) -> Any:
+    import chromadb
+    from chromadb.config import Settings
+
+    CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(
+        path=str(CHROMA_PERSIST_DIR),
+        settings=Settings(anonymized_telemetry=False),
+    )
+    collection = client.get_or_create_collection(
+        CHROMA_COLLECTION_NAME,
+        embedding_function=HashEmbeddingFunction(),
+    )
+    ids = [job.id for job in jobs]
+    if ids:
+        collection.upsert(
+            ids=ids,
+            documents=[job_document(job) for job in jobs],
+            metadatas=[
+                {
+                    "job_id": job.id,
+                    "document_hash": job_document_hash(job),
+                    "role_family": job.role_family,
+                    "location": job.location,
+                    "level": job.level,
+                    "status": job.status,
+                }
+                for job in jobs
+            ],
         )
-        ids = [job.id for job in jobs]
-        documents = [job_document(job) for job in jobs]
-        metadatas = [{"role_family": job.role_family, "location": job.location} for job in jobs]
-        if ids:
-            collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-        result = collection.query(query_texts=[query], n_results=min(top_n, len(jobs)))
-        return list(result.get("ids", [[]])[0])
+    return collection
+
+
+def chroma_retrieve(query: str, jobs: list[Job], top_n: int = 50) -> list[RetrievalHit]:
+    try:
+        collection = ensure_chroma_job_index(jobs)
+        allowed_ids = {job.id for job in jobs}
+        collection_count = collection.count()
+        if collection_count == 0:
+            return []
+        query_count = min(max(top_n * 4, top_n), collection_count)
+        result = collection.query(
+            query_texts=[query],
+            n_results=query_count,
+            include=["distances"],
+        )
+        ids = result.get("ids", [[]])[0]
+        distances = result.get("distances", [[]])[0]
+        scored: list[tuple[float, str]] = []
+        for job_id, distance in zip(ids, distances, strict=False):
+            if job_id not in allowed_ids:
+                continue
+            similarity = 1 / (1 + float(distance))
+            scored.append((similarity, job_id))
+            if len(scored) >= top_n:
+                break
+        hits = normalize_scores(scored)
+        return [RetrievalHit(job_id=hit.job_id, score=hit.score, source="chroma") for hit in hits]
     except Exception:
         return local_vector_retrieve(query, jobs, top_n)
 
 
 def merge_candidates(
     jobs_by_id: dict[str, Job],
-    bm25_ids: list[str],
-    vector_ids: list[str],
-) -> dict[str, set[str]]:
-    sources: dict[str, set[str]] = defaultdict(set)
-    for job_id in bm25_ids:
-        if job_id in jobs_by_id:
-            sources[job_id].add("bm25")
-    for job_id in vector_ids:
-        if job_id in jobs_by_id:
-            sources[job_id].add("chroma")
-    return sources
+    bm25_hits: list[RetrievalHit],
+    vector_hits: list[RetrievalHit],
+) -> dict[str, dict[str, float]]:
+    candidates: dict[str, dict[str, float]] = defaultdict(dict)
+    for hit in bm25_hits:
+        if hit.job_id in jobs_by_id:
+            candidates[hit.job_id][hit.source] = hit.score
+    for hit in vector_hits:
+        if hit.job_id in jobs_by_id:
+            candidates[hit.job_id][hit.source] = hit.score
+
+    for source_scores in candidates.values():
+        bm25_score = source_scores.get("bm25", 0.0)
+        vector_score = max(source_scores.get("chroma", 0.0), source_scores.get("local_vector", 0.0))
+        source_scores["fusion"] = round(bm25_score * 0.45 + vector_score * 0.55, 4)
+    return candidates
 
 
 def level_score(job: Job, wanted_levels: list[str]) -> float:
@@ -384,7 +511,7 @@ def skill_scores(job: Job, skills: set[str]) -> tuple[float, list[str], list[str
 
 
 def rule_rerank(
-    candidates: dict[str, set[str]],
+    candidates: dict[str, dict[str, float]],
     jobs_by_id: dict[str, Job],
     request: JobMatchRequest,
     profile: Profile,
@@ -397,7 +524,7 @@ def rule_rerank(
     wanted_families = request.role_families or role_families_for_direction(request.target_direction)
 
     results: list[JobMatchResult] = []
-    for job_id, sources in candidates.items():
+    for job_id, source_scores in candidates.items():
         job = jobs_by_id[job_id]
         coverage, matched, missing = skill_scores(job, skills)
         location = location_score(job, wanted_locations)
@@ -410,14 +537,19 @@ def rule_rerank(
                 final_score=round(rule, 2),
                 rule_score=round(rule, 2),
                 llm_score=round(rule, 2),
+                retrieval_fusion_score=round(source_scores.get("fusion", 0.0) * 100, 2),
                 skill_coverage=round(coverage, 2),
                 location_score=round(location * 20, 2),
                 level_score=round(level * 15, 2),
                 role_family_score=round(role * 15, 2),
-                match_reason=rule_reason(job, coverage, matched, missing, location, role),
+                match_reason=rule_reason(job, coverage, matched, missing, location, role, source_scores),
                 missing_skills=missing,
                 matched_skills=matched,
-                retrieval_sources=sorted(sources),
+                retrieval_sources=sorted(source for source in source_scores if source != "fusion"),
+                retrieval_source_scores={
+                    source: round(score * 100, 2)
+                    for source, score in sorted(source_scores.items())
+                },
             )
         )
 
@@ -431,11 +563,18 @@ def rule_reason(
     missing: list[str],
     location: float,
     role: float,
+    source_scores: dict[str, float],
 ) -> str:
     parts = [
         f"技能覆盖率 {round(coverage * 100)}%",
         f"匹配技能：{', '.join(matched) if matched else '暂无'}",
     ]
+    if source_scores:
+        source_text = "，".join(
+            f"{source} {round(score * 100)}"
+            for source, score in sorted(source_scores.items())
+        )
+        parts.append(f"检索分：{source_text}")
     if missing:
         parts.append(f"缺失技能：{', '.join(missing)}")
     if location == 0:
@@ -549,15 +688,21 @@ def match_jobs(
     jobs: list[Job],
     request: JobMatchRequest,
 ) -> JobMatchResponse:
+    if jobs:
+        try:
+            ensure_chroma_job_index(jobs)
+        except Exception:
+            pass
+
     filtered_jobs, metadata = metadata_filter_jobs(jobs, request, profile)
     query = user_document(profile, projects, resume, request.target_direction)
-    bm25_ids = bm25_retrieve(query, filtered_jobs, 50)
-    vector_ids = chroma_retrieve(query, filtered_jobs, 50)
+    bm25_hits = bm25_retrieve(query, filtered_jobs, 50)
+    vector_hits = chroma_retrieve(query, filtered_jobs, 50)
     jobs_by_id = {job.id: job for job in filtered_jobs}
-    candidates = merge_candidates(jobs_by_id, bm25_ids, vector_ids)
+    candidates = merge_candidates(jobs_by_id, bm25_hits, vector_hits)
 
     if not candidates:
-        candidates = {job.id: {"metadata"} for job in filtered_jobs[:50]}
+        candidates = {job.id: {"metadata": 1.0, "fusion": 1.0} for job in filtered_jobs[:50]}
 
     rule_ranked = rule_rerank(candidates, jobs_by_id, request, profile, projects, resume)
     llm_count = max(0, min(request.llm_candidate_count, len(rule_ranked)))
@@ -571,8 +716,9 @@ def match_jobs(
         metadata_filter=metadata,
         candidate_counts={
             "metadata_filtered": len(filtered_jobs),
-            "bm25_top": len(bm25_ids),
-            "chroma_top": len(vector_ids),
+            "bm25_top": len(bm25_hits),
+            "chroma_top": len([hit for hit in vector_hits if hit.source == "chroma"]),
+            "local_vector_top": len([hit for hit in vector_hits if hit.source == "local_vector"]),
             "merged_candidates": len(candidates),
             "llm_reranked": llm_count,
         },

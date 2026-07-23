@@ -12,6 +12,7 @@ from app.model_config import AGENT_ORCHESTRATOR_MODEL
 from app.model_logging import invoke_model_with_logging, log_model_fallback
 from app.models import (
     AgentRunModel,
+    AgentStateModel,
     CareerDirectionsModel,
     GeneratedResumeModel,
     JobModel,
@@ -22,11 +23,14 @@ from app.profiling import profile_project_text
 from app.resume_generation import generate_resume_content
 from app.schemas import (
     AgentExecutionStep,
+    AgentState,
     CareerAgentGoal,
     CareerAgentRequest,
     CareerAgentResponse,
     CareerDirectionRecommendation,
     CareerDirectionsSnapshot,
+    FeedbackEntry,
+    FeedbackMemory,
     GeneratedResume,
     Job,
     JobMatchRequest,
@@ -37,6 +41,10 @@ from app.schemas import (
     ResumeProjectSection,
     SkillGapAnalysisRequest,
     SkillGapAnalysisResponse,
+    TaskPlan,
+    TaskPlanStep,
+    UserPreference,
+    WorkflowStepReuse,
 )
 from app.skill_gap import run_skill_gap_analysis
 
@@ -58,6 +66,7 @@ class AgentPlanDraft(BaseModel):
     run_job_ranking: bool = False
     run_skill_gap_analysis: bool = False
     run_next_step_plan: bool = False
+    task_plan: TaskPlan = Field(default_factory=TaskPlan)
 
 
 AGENT_PLAN_PROMPT = ChatPromptTemplate.from_messages(
@@ -79,6 +88,10 @@ Graduate Software Engineer, Software Engineer.
 Execution plan should usually include:
 Project Profiling, Career Direction, Resume Generation, Job Ranking,
 Skill Gap Analysis, Next Step Plan.
+
+task_plan may be empty. The backend will convert selected run_* flags into a
+validated TaskPlan with stable step ids, tool names, dependencies, rerun policy,
+input refs, and output refs.
 
 Before selecting tools, infer the minimum tool set needed for the user's request.
 Set each run_* boolean independently:
@@ -163,6 +176,129 @@ def resume_from_model(resume: GeneratedResumeModel) -> GeneratedResume:
         ],
         selected_project_ids=resume.selected_project_ids or [],
     )
+
+
+def state_from_model(state_model: AgentStateModel | None) -> AgentState:
+    if state_model is None:
+        return AgentState(profile_id=DEFAULT_PROFILE_ID)
+
+    return AgentState(
+        profile_id=state_model.profile_id,
+        preference=UserPreference.model_validate(state_model.preferences or {}),
+        latest_resume_id=state_model.latest_resume_id or "",
+        latest_job_match_ids=state_model.latest_job_match_ids or [],
+        latest_gap_result=SkillGapAnalysisResponse.model_validate(state_model.latest_gap_result or {}),
+        feedback_memory=FeedbackMemory.model_validate(state_model.feedback_memory or {}),
+        last_agent_run_id=state_model.last_agent_run_id or "",
+        last_target_direction=state_model.last_target_direction or "",
+        project_count=state_model.project_count or 0,
+        updated_at=state_model.updated_at.isoformat() if state_model.updated_at else "",
+    )
+
+
+def get_agent_state(db: Session) -> AgentState:
+    return state_from_model(db.get(AgentStateModel, DEFAULT_PROFILE_ID))
+
+
+def preference_from_goal(goal: CareerAgentGoal) -> UserPreference:
+    return UserPreference(
+        target_direction=goal.target_direction,
+        locations=goal.locations,
+        levels=goal.levels,
+        role_families=goal.role_families,
+    )
+
+
+def merge_goal_with_state(draft: AgentPlanDraft, previous_state: AgentState) -> None:
+    preference = previous_state.preference
+    if not draft.target_direction:
+        draft.target_direction = preference.target_direction or previous_state.last_target_direction
+    if not draft.locations:
+        draft.locations = list(preference.locations)
+    if not draft.levels:
+        draft.levels = list(preference.levels)
+    if not draft.role_families:
+        draft.role_families = list(preference.role_families)
+
+
+def message_updates_preferences(message: str, previous_state: AgentState) -> bool:
+    if not previous_state.last_agent_run_id:
+        return False
+    return bool(
+        re.search(
+            r"这些岗位|岗位.*太偏|太偏|不想|不要|换成|改成|更想|更偏|我想做|偏前端|偏后端|preference|prefer",
+            message,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def force_partial_rerun_for_feedback(draft: AgentPlanDraft) -> None:
+    draft.run_project_profiling = False
+    draft.run_career_direction = False
+    draft.run_resume_generation = False
+    draft.run_job_ranking = True
+    draft.run_skill_gap_analysis = True
+    draft.run_next_step_plan = True
+    refresh_task_plan(draft, feedback_rerun=True)
+
+
+def load_resume_for_rerun(
+    db: Session,
+    previous_state: AgentState,
+    target_direction: str,
+) -> GeneratedResume | None:
+    resume: GeneratedResumeModel | None = None
+    if previous_state.latest_resume_id:
+        resume = db.get(GeneratedResumeModel, previous_state.latest_resume_id)
+
+    if resume is None:
+        resume_query = db.query(GeneratedResumeModel).filter(
+            GeneratedResumeModel.profile_id == DEFAULT_PROFILE_ID
+        )
+        if target_direction:
+            resume_query = resume_query.filter(
+                GeneratedResumeModel.target_direction == target_direction
+            )
+        resume = resume_query.order_by(GeneratedResumeModel.created_at.desc()).first()
+
+    if resume is None or resume.profile_id != DEFAULT_PROFILE_ID:
+        return None
+    return resume_from_model(resume)
+
+
+def build_feedback_entry(
+    message: str,
+    preference: UserPreference,
+    rerun_tools: list[str],
+) -> FeedbackEntry:
+    return FeedbackEntry(
+        message=message,
+        extracted_preferences=preference,
+        rerun_tools=rerun_tools,
+    )
+
+
+def save_agent_state(
+    db: Session,
+    state: AgentState,
+) -> AgentState:
+    state_model = db.get(AgentStateModel, state.profile_id)
+    if state_model is None:
+        state_model = AgentStateModel(profile_id=state.profile_id)
+        db.add(state_model)
+
+    state_model.preferences = state.preference.model_dump(mode="json")
+    state_model.latest_resume_id = state.latest_resume_id
+    state_model.latest_job_match_ids = state.latest_job_match_ids
+    state_model.latest_gap_result = state.latest_gap_result.model_dump(mode="json")
+    state_model.feedback_memory = state.feedback_memory.model_dump(mode="json")
+    state_model.last_agent_run_id = state.last_agent_run_id
+    state_model.last_target_direction = state.last_target_direction
+    state_model.project_count = state.project_count
+    db.flush()
+    db.refresh(state_model)
+    return state_from_model(state_model)
 
 
 def fallback_goal(message: str) -> AgentPlanDraft:
@@ -279,6 +415,192 @@ def execution_plan_from_tools(tool_plan: dict[str, bool]) -> list[str]:
     return plan
 
 
+def task_plan_from_tools(
+    tool_plan: dict[str, bool],
+    feedback_rerun: bool = False,
+) -> TaskPlan:
+    steps = [
+        TaskPlanStep(
+            step_id="goal_understanding",
+            tool_name="agent_goal_parser",
+            status="planned",
+            rerun_policy="always",
+            input_refs=["request.message", "agent_state.preference"],
+            output_refs=["goal", "tool_flags"],
+        )
+    ]
+    previous_step = "goal_understanding"
+
+    if tool_plan.get("run_project_profiling"):
+        steps.append(
+            TaskPlanStep(
+                step_id="project_profiling",
+                tool_name="project_profiling_tool",
+                depends_on=[previous_step],
+                rerun_policy="on_new_project_notes",
+                input_refs=["goal.project_notes"],
+                output_refs=["project_profile_preview"],
+            )
+        )
+        previous_step = "project_profiling"
+
+    if tool_plan.get("run_career_direction"):
+        steps.append(
+            TaskPlanStep(
+                step_id="career_direction",
+                tool_name="career_direction_tool",
+                depends_on=["goal_understanding"],
+                rerun_policy="on_profile_or_project_change",
+                input_refs=["profile", "projects"],
+                output_refs=["career_directions"],
+            )
+        )
+        previous_step = "career_direction"
+
+    if tool_plan.get("run_resume_generation"):
+        depends_on = ["career_direction"] if tool_plan.get("run_career_direction") else ["goal_understanding"]
+        steps.append(
+            TaskPlanStep(
+                step_id="resume_generation",
+                tool_name="resume_generation_tool",
+                depends_on=depends_on,
+                rerun_policy="on_target_direction_or_profile_change",
+                input_refs=["profile", "projects", "goal.target_direction"],
+                output_refs=["generated_resume", "agent_state.latest_resume_id"],
+            )
+        )
+        previous_step = "resume_generation"
+
+    if tool_plan.get("run_job_ranking"):
+        depends_on = ["resume_generation"] if tool_plan.get("run_resume_generation") else ["goal_understanding"]
+        input_refs = [
+            "profile",
+            "projects",
+            "goal.target_direction",
+            "goal.locations",
+            "goal.levels",
+            "goal.role_families",
+            "agent_state.latest_resume_id",
+        ]
+        if feedback_rerun:
+            input_refs.append("feedback_memory.last_feedback")
+        steps.append(
+            TaskPlanStep(
+                step_id="job_ranking",
+                tool_name="job_matching_tool",
+                depends_on=depends_on,
+                rerun_policy="on_preference_or_resume_change",
+                input_refs=input_refs,
+                output_refs=["job_matches", "agent_state.latest_job_match_ids"],
+            )
+        )
+        previous_step = "job_ranking"
+
+    if tool_plan.get("run_skill_gap_analysis"):
+        depends_on = ["job_ranking"] if tool_plan.get("run_job_ranking") else [previous_step]
+        steps.append(
+            TaskPlanStep(
+                step_id="skill_gap_analysis",
+                tool_name="skill_gap_analysis_tool",
+                depends_on=depends_on,
+                rerun_policy="on_job_matches_or_profile_skills_change",
+                input_refs=["profile.skills", "projects.technologies", "job_matches.top3"],
+                output_refs=["skill_gap", "agent_state.latest_gap_result"],
+            )
+        )
+        previous_step = "skill_gap_analysis"
+
+    if tool_plan.get("run_next_step_plan"):
+        depends_on = ["skill_gap_analysis"] if tool_plan.get("run_skill_gap_analysis") else [previous_step]
+        steps.append(
+            TaskPlanStep(
+                step_id="next_step_plan",
+                tool_name="next_step_plan_tool",
+                depends_on=depends_on,
+                rerun_policy="on_gap_result_change",
+                input_refs=["skill_gap", "goal.timeline_weeks", "goal.target_direction"],
+                output_refs=["skill_gap.next_step_plan"],
+            )
+        )
+
+    return TaskPlan(steps=steps)
+
+
+def tool_plan_from_draft(draft: AgentPlanDraft) -> dict[str, bool]:
+    return {
+        "run_project_profiling": draft.run_project_profiling,
+        "run_career_direction": draft.run_career_direction,
+        "run_resume_generation": draft.run_resume_generation,
+        "run_job_ranking": draft.run_job_ranking,
+        "run_skill_gap_analysis": draft.run_skill_gap_analysis,
+        "run_next_step_plan": draft.run_next_step_plan,
+    }
+
+
+def refresh_task_plan(draft: AgentPlanDraft, feedback_rerun: bool = False) -> None:
+    tool_plan = tool_plan_from_draft(draft)
+    draft.execution_plan = execution_plan_from_tools(tool_plan)
+    draft.task_plan = task_plan_from_tools(tool_plan, feedback_rerun)
+
+
+def update_task_status(task_plan: TaskPlan, step_id: str, status: str) -> None:
+    for step in task_plan.steps:
+        if step.step_id == step_id:
+            step.status = status
+            return
+
+
+def rerun_steps_from_task_plan(task_plan: TaskPlan) -> list[TaskPlanStep]:
+    rerun_step_ids = {"job_ranking", "skill_gap_analysis", "next_step_plan"}
+    return [step for step in task_plan.steps if step.step_id in rerun_step_ids]
+
+
+def reused_steps_for_partial_rerun(
+    previous_state: AgentState,
+    reusable_resume: GeneratedResume | None,
+) -> list[WorkflowStepReuse]:
+    reused = [
+        WorkflowStepReuse(
+            step_id="project_profiling",
+            tool_name="project_profiling_tool",
+            source_refs=["profile", "projects"],
+            output_refs=["projects"],
+            reason="用户反馈只调整岗位偏好，未提供新的项目经历，因此保留已有 Profile/Projects。",
+        )
+    ]
+    if previous_state.last_target_direction:
+        reused.append(
+            WorkflowStepReuse(
+                step_id="career_direction",
+                tool_name="career_direction_tool",
+                source_refs=["agent_state.last_target_direction", "agent_state.preference"],
+                output_refs=["goal.target_direction", "goal.role_families"],
+                reason="本次反馈直接给出目标偏好，跳过职业方向重新推荐。",
+            )
+        )
+    if reusable_resume:
+        reused.append(
+            WorkflowStepReuse(
+                step_id="resume_generation",
+                tool_name="resume_generation_tool",
+                source_refs=["agent_state.latest_resume_id"],
+                output_refs=["generated_resume"],
+                reason=f"复用最近简历版本 {reusable_resume.id}，不重新生成简历。",
+            )
+        )
+    elif previous_state.latest_resume_id:
+        reused.append(
+            WorkflowStepReuse(
+                step_id="resume_generation",
+                tool_name="resume_generation_tool",
+                source_refs=["agent_state.latest_resume_id"],
+                output_refs=["agent_state.latest_resume_id"],
+                reason=f"保留最近简历版本 {previous_state.latest_resume_id}，但本次未加载到对应简历内容。",
+            )
+        )
+    return reused
+
+
 def normalize_tool_plan(draft: AgentPlanDraft, message: str = "") -> AgentPlanDraft:
     inferred = infer_tool_plan_from_message(message, bool(draft.target_direction))
     message_inferred = None
@@ -305,16 +627,7 @@ def normalize_tool_plan(draft: AgentPlanDraft, message: str = "") -> AgentPlanDr
     if draft.run_next_step_plan and draft.run_skill_gap_analysis:
         draft.run_job_ranking = True
 
-    draft.execution_plan = execution_plan_from_tools(
-        {
-            "run_project_profiling": draft.run_project_profiling,
-            "run_career_direction": draft.run_career_direction,
-            "run_resume_generation": draft.run_resume_generation,
-            "run_job_ranking": draft.run_job_ranking,
-            "run_skill_gap_analysis": draft.run_skill_gap_analysis,
-            "run_next_step_plan": draft.run_next_step_plan,
-        }
-    )
+    refresh_task_plan(draft)
     return draft
 
 
@@ -435,7 +748,16 @@ def run_career_agent(
     db: Session,
 ) -> CareerAgentResponse:
     steps: list[AgentExecutionStep] = []
+    previous_state = get_agent_state(db)
     draft = parse_agent_goal(request.message)
+    is_feedback_rerun = message_updates_preferences(request.message, previous_state)
+    merge_goal_with_state(draft, previous_state)
+    draft = canonicalize_goal(draft, request.message)
+    if is_feedback_rerun:
+        force_partial_rerun_for_feedback(draft)
+    task_plan = draft.task_plan
+    update_task_status(task_plan, "goal_understanding", "completed")
+
     goal = CareerAgentGoal(
         target_direction=draft.target_direction,
         locations=draft.locations,
@@ -444,7 +766,17 @@ def run_career_agent(
         timeline_weeks=draft.timeline_weeks,
         project_notes=draft.project_notes,
     )
-    steps.append(AgentExecutionStep(name="理解目标", status="completed", detail="已解析用户目标和执行计划。"))
+    steps.append(
+        AgentExecutionStep(
+            name="理解目标",
+            status="completed",
+            detail=(
+                "已读取旧 Agent State，并根据用户反馈调整偏好，只重跑岗位排序及下游步骤。"
+                if is_feedback_rerun
+                else "已解析用户目标和执行计划。"
+            ),
+        )
+    )
 
     profile = profile_from_model(db.get(ProfileModel, DEFAULT_PROFILE_ID))
     projects = [
@@ -458,6 +790,7 @@ def run_career_agent(
     project_preview: ProjectInput | None = None
     if draft.run_project_profiling and goal.project_notes.strip():
         project_preview = profile_project_text(goal.project_notes)
+        update_task_status(task_plan, "project_profiling", "preview")
         steps.append(
             AgentExecutionStep(
                 name="Project Profiling",
@@ -466,6 +799,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "project_profiling", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Project Profiling",
@@ -483,6 +817,7 @@ def run_career_agent(
     if draft.run_career_direction:
         recommendations = recommend_career_directions(profile, projects)
         career_snapshot = save_career_directions(db, recommendations)
+        update_task_status(task_plan, "career_direction", "completed")
         steps.append(
             AgentExecutionStep(
                 name="Career Direction",
@@ -491,6 +826,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "career_direction", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Career Direction",
@@ -510,6 +846,7 @@ def run_career_agent(
             db,
             generate_resume_content(profile, projects, target_direction),
         )
+        update_task_status(task_plan, "resume_generation", "completed")
         steps.append(
             AgentExecutionStep(
                 name="Resume Generation",
@@ -518,6 +855,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "resume_generation", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Resume Generation",
@@ -530,6 +868,18 @@ def run_career_agent(
             )
         )
 
+    reusable_resume = generated_resume
+    if reusable_resume is None and draft.run_job_ranking:
+        reusable_resume = load_resume_for_rerun(db, previous_state, target_direction)
+        if is_feedback_rerun and reusable_resume:
+            steps.append(
+                AgentExecutionStep(
+                    name="State Reuse",
+                    status="completed",
+                    detail=f"已复用上一版简历 {reusable_resume.id} 进行局部重跑。",
+                )
+            )
+
     job_matches = JobMatchResponse()
     if draft.run_job_ranking:
         jobs = [
@@ -539,7 +889,7 @@ def run_career_agent(
             .order_by(JobModel.role_family, JobModel.location, JobModel.title)
             .all()
         ]
-        resume_data = generated_resume.model_dump() if generated_resume else None
+        resume_data = reusable_resume.model_dump() if reusable_resume else None
         job_request = JobMatchRequest(
             target_direction=target_direction,
             locations=goal.locations,
@@ -555,6 +905,7 @@ def run_career_agent(
         location_detail = ""
         if requested_locations and job_matches.matches and not (requested_locations & returned_locations):
             location_detail = " 未找到目标城市岗位，已按职级和方向回退到其它城市岗位。"
+        update_task_status(task_plan, "job_ranking", "completed")
         steps.append(
             AgentExecutionStep(
                 name="Job Ranking",
@@ -563,6 +914,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "job_ranking", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Job Ranking",
@@ -583,6 +935,7 @@ def run_career_agent(
             profile,
             projects,
         )
+        update_task_status(task_plan, "skill_gap_analysis", "completed")
         steps.append(
             AgentExecutionStep(
                 name="Skill Gap Analysis",
@@ -591,6 +944,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "skill_gap_analysis", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Skill Gap Analysis",
@@ -611,6 +965,7 @@ def run_career_agent(
                 profile,
                 projects,
             )
+        update_task_status(task_plan, "next_step_plan", "completed")
         steps.append(
             AgentExecutionStep(
                 name="Next Step Plan",
@@ -619,6 +974,7 @@ def run_career_agent(
             )
         )
     else:
+        update_task_status(task_plan, "next_step_plan", "skipped")
         steps.append(
             AgentExecutionStep(
                 name="Next Step Plan",
@@ -627,34 +983,102 @@ def run_career_agent(
             )
         )
 
+    agent_run_id = str(uuid4())
+    rerun_tools = [
+        name
+        for name, enabled in [
+            ("job_ranking", draft.run_job_ranking),
+            ("skill_gap_analysis", draft.run_skill_gap_analysis),
+            ("next_step_plan", draft.run_next_step_plan),
+        ]
+        if enabled
+    ]
+    preference = preference_from_goal(goal)
+    if not preference.target_direction:
+        preference.target_direction = previous_state.preference.target_direction
+    if not preference.locations:
+        preference.locations = list(previous_state.preference.locations)
+    if not preference.levels:
+        preference.levels = list(previous_state.preference.levels)
+    if not preference.role_families:
+        preference.role_families = list(previous_state.preference.role_families)
+
+    feedback_entries = list(previous_state.feedback_memory.entries)
+    last_feedback = previous_state.feedback_memory.last_feedback
+    if is_feedback_rerun:
+        feedback_entries.append(build_feedback_entry(request.message, preference, rerun_tools))
+        feedback_entries = feedback_entries[-20:]
+        last_feedback = request.message
+
+    latest_resume_id = (
+        generated_resume.id
+        if generated_resume
+        else reusable_resume.id
+        if reusable_resume
+        else previous_state.latest_resume_id
+    )
+    latest_job_match_ids = (
+        [match.job.id for match in job_matches.matches]
+        if draft.run_job_ranking
+        else previous_state.latest_job_match_ids
+    )
+    latest_gap_result = skill_gap if draft.run_skill_gap_analysis or draft.run_next_step_plan else previous_state.latest_gap_result
+    reused_steps = reused_steps_for_partial_rerun(previous_state, reusable_resume) if is_feedback_rerun else []
+    rerun_steps = rerun_steps_from_task_plan(task_plan) if is_feedback_rerun else []
+    summary = {
+        "profile_id": DEFAULT_PROFILE_ID,
+        "project_count": len(projects),
+        "resume_id": latest_resume_id or None,
+        "target_direction": target_direction,
+        "job_match_count": len(job_matches.matches),
+        "gap_severity": latest_gap_result.gap_severity,
+        "timeline_weeks": goal.timeline_weeks,
+        "is_feedback_rerun": is_feedback_rerun,
+        "run_project_profiling": draft.run_project_profiling,
+        "run_career_direction": draft.run_career_direction,
+        "run_resume_generation": draft.run_resume_generation,
+        "run_job_ranking": draft.run_job_ranking,
+        "run_skill_gap_analysis": draft.run_skill_gap_analysis,
+        "run_next_step_plan": draft.run_next_step_plan,
+        "reused_step_count": len(reused_steps),
+        "rerun_step_count": len(rerun_steps),
+        "agent_run_id": agent_run_id,
+    }
+    current_state = save_agent_state(
+        db,
+        AgentState(
+            profile_id=DEFAULT_PROFILE_ID,
+            preference=preference,
+            latest_resume_id=latest_resume_id,
+            latest_job_match_ids=latest_job_match_ids,
+            latest_gap_result=latest_gap_result,
+            feedback_memory=FeedbackMemory(
+                entries=feedback_entries,
+                last_feedback=last_feedback,
+            ),
+            last_agent_run_id=agent_run_id,
+            last_target_direction=target_direction,
+            project_count=len(projects),
+            summary=summary,
+        ),
+    )
+    current_state.summary = summary
+
     response = CareerAgentResponse(
         user_message=request.message,
         goal=goal,
         execution_plan=draft.execution_plan or default_execution_plan(),
+        task_plan=task_plan,
+        reused_steps=reused_steps,
+        rerun_steps=rerun_steps,
         steps=steps,
         project_profile_preview=project_preview,
         career_directions=career_snapshot,
         generated_resume=generated_resume,
         job_matches=job_matches,
         skill_gap=skill_gap,
-        state={
-            "profile_id": DEFAULT_PROFILE_ID,
-            "project_count": len(projects),
-            "resume_id": generated_resume.id if generated_resume else None,
-            "target_direction": target_direction,
-            "job_match_count": len(job_matches.matches),
-            "gap_severity": skill_gap.gap_severity,
-            "timeline_weeks": goal.timeline_weeks,
-            "run_project_profiling": draft.run_project_profiling,
-            "run_career_direction": draft.run_career_direction,
-            "run_resume_generation": draft.run_resume_generation,
-            "run_job_ranking": draft.run_job_ranking,
-            "run_skill_gap_analysis": draft.run_skill_gap_analysis,
-            "run_next_step_plan": draft.run_next_step_plan,
-        },
+        state=current_state,
     )
-    agent_run_id = str(uuid4())
-    response.state["agent_run_id"] = agent_run_id
     db.add(
         AgentRunModel(
             id=agent_run_id,

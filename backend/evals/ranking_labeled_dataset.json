@@ -1,0 +1,54 @@
+[
+  {
+    "id": "ranking_backend_python",
+    "request": {
+      "target_direction": "Backend Developer",
+      "locations": ["北京", "上海"],
+      "levels": ["初级", "应届", "校招", "1年以内"],
+      "role_families": ["Backend"],
+      "top_k": 10
+    },
+    "profile": {
+      "location": "北京",
+      "skills": ["Python", "FastAPI", "SQL", "PostgreSQL", "REST API"]
+    },
+    "projects": [
+      {
+        "id": "eval-project-backend",
+        "category": "project",
+        "title": "Resume to Offer",
+        "role": "Backend Developer",
+        "description": "Built FastAPI REST APIs with PostgreSQL and SQLAlchemy.",
+        "technologies": ["Python", "FastAPI", "PostgreSQL", "SQLAlchemy"],
+        "highlights": ["Implemented API endpoints and job ranking workflow."]
+      }
+    ],
+    "relevant_job_ids": ["job-backend-001", "job-backend-003", "job-backend-006"]
+  },
+  {
+    "id": "ranking_ai_rag",
+    "request": {
+      "target_direction": "AI Application Developer",
+      "locations": ["北京", "上海"],
+      "levels": ["初级", "实习", "应届"],
+      "role_families": ["AI Application"],
+      "top_k": 10
+    },
+    "profile": {
+      "location": "上海",
+      "skills": ["Python", "LangChain", "LLM", "ChromaDB", "FastAPI"]
+    },
+    "projects": [
+      {
+        "id": "eval-project-rag",
+        "category": "project",
+        "title": "RAG Job Assistant",
+        "role": "AI Application Developer",
+        "description": "Built RAG workflow with embeddings, vector database, and FastAPI.",
+        "technologies": ["Python", "LangChain", "ChromaDB", "FastAPI"],
+        "highlights": ["Implemented retrieval and LLM reranking."]
+      }
+    ],
+    "relevant_job_ids": ["job-ai-001", "job-ai-002", "job-ai-003", "job-ai-004"]
+  }
+]

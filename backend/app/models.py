@@ -115,3 +115,26 @@ class AgentRunModel(Base):
     goal: Mapped[dict] = mapped_column(JSONB, default=dict)
     steps: Mapped[list[dict]] = mapped_column(JSONB, default=list)
     result: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class AgentStateModel(Base):
+    __tablename__ = "agent_states"
+
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+        default=1,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
+    latest_resume_id: Mapped[str] = mapped_column(String(36), default="")
+    latest_job_match_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    latest_gap_result: Mapped[dict] = mapped_column(JSONB, default=dict)
+    feedback_memory: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_agent_run_id: Mapped[str] = mapped_column(String(36), default="")
+    last_target_direction: Mapped[str] = mapped_column(String(160), default="")
+    project_count: Mapped[int] = mapped_column(Integer, default=0)

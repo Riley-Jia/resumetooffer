@@ -78,6 +78,22 @@ def create_tables() -> None:
                 ")"
             )
         )
+        connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS agent_states ("
+                "profile_id INTEGER PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE, "
+                "updated_at TIMESTAMPTZ DEFAULT now(), "
+                "preferences JSONB DEFAULT '{}'::jsonb, "
+                "latest_resume_id VARCHAR(36) DEFAULT '', "
+                "latest_job_match_ids JSONB DEFAULT '[]'::jsonb, "
+                "latest_gap_result JSONB DEFAULT '{}'::jsonb, "
+                "feedback_memory JSONB DEFAULT '{}'::jsonb, "
+                "last_agent_run_id VARCHAR(36) DEFAULT '', "
+                "last_target_direction VARCHAR(160) DEFAULT '', "
+                "project_count INTEGER DEFAULT 0"
+                ")"
+            )
+        )
         connection.execute(text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS status VARCHAR(40) DEFAULT 'active'"))
         connection.execute(text("UPDATE jobs SET status = 'active' WHERE status IS NULL OR status = ''"))
 

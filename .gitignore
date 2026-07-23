@@ -13,3 +13,6 @@ npm-debug.log*
 
 # Frontend build
 frontend/dist/
+
+# Retrieval indexes
+backend/data/chroma_jobs/

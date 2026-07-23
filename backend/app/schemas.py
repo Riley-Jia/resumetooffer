@@ -103,6 +103,7 @@ class JobMatchResult(BaseModel):
     final_score: float
     rule_score: float
     llm_score: float
+    retrieval_fusion_score: float = 0.0
     skill_coverage: float
     location_score: float
     level_score: float
@@ -111,6 +112,7 @@ class JobMatchResult(BaseModel):
     missing_skills: list[str] = Field(default_factory=list)
     matched_skills: list[str] = Field(default_factory=list)
     retrieval_sources: list[str] = Field(default_factory=list)
+    retrieval_source_scores: dict[str, float] = Field(default_factory=dict)
 
 
 class JobMatchResponse(BaseModel):
@@ -156,6 +158,39 @@ class SkillGapAnalysisResponse(BaseModel):
     per_job_gaps: list[JobSkillGap] = Field(default_factory=list)
     next_step_plan: list[NextStepPlanWeek] = Field(default_factory=list)
     learning_plan: list[LearningPlanWeek] = Field(default_factory=list)
+
+
+class UserPreference(BaseModel):
+    target_direction: str = ""
+    locations: list[str] = Field(default_factory=list)
+    levels: list[str] = Field(default_factory=list)
+    role_families: list[str] = Field(default_factory=list)
+
+
+class FeedbackEntry(BaseModel):
+    message: str
+    feedback_type: str = "preference_update"
+    extracted_preferences: UserPreference = Field(default_factory=UserPreference)
+    rerun_tools: list[str] = Field(default_factory=list)
+
+
+class FeedbackMemory(BaseModel):
+    entries: list[FeedbackEntry] = Field(default_factory=list)
+    last_feedback: str = ""
+
+
+class AgentState(BaseModel):
+    profile_id: int = 1
+    preference: UserPreference = Field(default_factory=UserPreference)
+    latest_resume_id: str = ""
+    latest_job_match_ids: list[str] = Field(default_factory=list)
+    latest_gap_result: SkillGapAnalysisResponse = Field(default_factory=SkillGapAnalysisResponse)
+    feedback_memory: FeedbackMemory = Field(default_factory=FeedbackMemory)
+    last_agent_run_id: str = ""
+    last_target_direction: str = ""
+    project_count: int = 0
+    updated_at: str = ""
+    summary: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
 
 
 class CareerAgentRequest(BaseModel):
@@ -271,14 +306,40 @@ class AgentExecutionStep(BaseModel):
     detail: str = ""
 
 
+class TaskPlanStep(BaseModel):
+    step_id: str
+    tool_name: str
+    depends_on: list[str] = Field(default_factory=list)
+    status: str = "planned"
+    rerun_policy: str = "always"
+    input_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
+
+
+class TaskPlan(BaseModel):
+    steps: list[TaskPlanStep] = Field(default_factory=list)
+
+
+class WorkflowStepReuse(BaseModel):
+    step_id: str
+    tool_name: str
+    status: str = "reused"
+    source_refs: list[str] = Field(default_factory=list)
+    output_refs: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 class CareerAgentResponse(BaseModel):
     user_message: str
     goal: CareerAgentGoal
     execution_plan: list[str] = Field(default_factory=list)
+    task_plan: TaskPlan = Field(default_factory=TaskPlan)
+    reused_steps: list[WorkflowStepReuse] = Field(default_factory=list)
+    rerun_steps: list[TaskPlanStep] = Field(default_factory=list)
     steps: list[AgentExecutionStep] = Field(default_factory=list)
     project_profile_preview: ProjectInput | None = None
     career_directions: CareerDirectionsSnapshot = Field(default_factory=CareerDirectionsSnapshot)
     generated_resume: GeneratedResume | None = None
     job_matches: JobMatchResponse = Field(default_factory=JobMatchResponse)
     skill_gap: SkillGapAnalysisResponse = Field(default_factory=SkillGapAnalysisResponse)
-    state: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    state: AgentState = Field(default_factory=AgentState)

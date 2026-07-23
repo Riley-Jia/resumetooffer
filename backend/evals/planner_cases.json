@@ -1,0 +1,26 @@
+[
+  {
+    "id": "planner_resume_only",
+    "message": "帮我生成一版后端开发简历",
+    "expected_target_direction": "Backend Developer",
+    "expected_tools": ["resume_generation"]
+  },
+  {
+    "id": "planner_jobs_gap_plan",
+    "message": "我想投北京初级后端岗位，推荐岗位、分析差距并给我学习计划",
+    "expected_target_direction": "Backend Developer",
+    "expected_tools": ["job_ranking", "skill_gap_analysis", "next_step_plan"]
+  },
+  {
+    "id": "planner_project_preview",
+    "message": "请把这个项目经历抽取成结构化预览：我做了一个 FastAPI 和 ChromaDB 的知识库问答项目，负责工具调用和结果评估",
+    "expected_tools": ["project_profiling"]
+  },
+  {
+    "id": "planner_partial_feedback",
+    "message": "这些岗位太偏前端，我想做后端",
+    "feedback_rerun": true,
+    "expected_target_direction": "Backend Developer",
+    "expected_tools": ["job_ranking", "skill_gap_analysis", "next_step_plan"]
+  }
+]

@@ -1,0 +1,45 @@
+[
+  {
+    "id": "trace_resume_only",
+    "message": "帮我生成一版后端开发简历",
+    "expected_trace": [
+      {
+        "step_id": "goal_understanding",
+        "tool_name": "agent_goal_parser",
+        "depends_on": []
+      },
+      {
+        "step_id": "resume_generation",
+        "tool_name": "resume_generation_tool",
+        "depends_on": ["goal_understanding"]
+      }
+    ]
+  },
+  {
+    "id": "trace_partial_feedback",
+    "message": "这些岗位太偏前端，我想做后端",
+    "feedback_rerun": true,
+    "expected_trace": [
+      {
+        "step_id": "goal_understanding",
+        "tool_name": "agent_goal_parser",
+        "depends_on": []
+      },
+      {
+        "step_id": "job_ranking",
+        "tool_name": "job_matching_tool",
+        "depends_on": ["goal_understanding"]
+      },
+      {
+        "step_id": "skill_gap_analysis",
+        "tool_name": "skill_gap_analysis_tool",
+        "depends_on": ["job_ranking"]
+      },
+      {
+        "step_id": "next_step_plan",
+        "tool_name": "next_step_plan_tool",
+        "depends_on": ["skill_gap_analysis"]
+      }
+    ]
+  }
+]

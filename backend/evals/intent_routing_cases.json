@@ -1,0 +1,32 @@
+[
+  {
+    "id": "intent_resume_agent",
+    "message": "帮我生成一版后端开发简历",
+    "expected_intent": "run_career_agent",
+    "expected_route": "career_agent_run"
+  },
+  {
+    "id": "intent_profile_skills",
+    "message": "我的技能加上 Python、FastAPI 和 PostgreSQL",
+    "expected_intent": "edit_profile",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_work_experience_project",
+    "message": "我在云帆科技实习，负责 FastAPI 后端接口和 PostgreSQL 数据表开发",
+    "expected_intent": "edit_project",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_job_posting",
+    "message": "JD：岗位职责包括开发 REST API，任职要求 Python、SQL、Docker",
+    "expected_intent": "analyze_job_posting",
+    "expected_route": "need_confirmation"
+  },
+  {
+    "id": "intent_unknown",
+    "message": "今天先随便看看",
+    "expected_intent": "unknown",
+    "expected_route": "need_confirmation"
+  }
+]
