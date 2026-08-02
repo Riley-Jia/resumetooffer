@@ -16,3 +16,6 @@ frontend/dist/
 
 # Retrieval indexes
 backend/data/chroma_jobs/
+
+# Evaluation reports
+backend/evals/reports/

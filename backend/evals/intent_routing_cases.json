@@ -6,20 +6,68 @@
     "expected_route": "career_agent_run"
   },
   {
+    "id": "intent_jobs_agent",
+    "message": "请帮我推荐上海 AI Application 岗位",
+    "expected_intent": "run_career_agent",
+    "expected_route": "career_agent_run"
+  },
+  {
+    "id": "intent_gap_plan_agent",
+    "message": "分析后端岗位差距，并给我三周学习计划",
+    "expected_intent": "run_career_agent",
+    "expected_route": "career_agent_run"
+  },
+  {
     "id": "intent_profile_skills",
     "message": "我的技能加上 Python、FastAPI 和 PostgreSQL",
     "expected_intent": "edit_profile",
     "expected_route": "profile_project_edit_preview"
   },
   {
-    "id": "intent_work_experience_project",
-    "message": "我在云帆科技实习，负责 FastAPI 后端接口和 PostgreSQL 数据表开发",
+    "id": "intent_profile_location",
+    "message": "把我的 location 改成 Sydney",
+    "expected_intent": "edit_profile",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_profile_remove_skill",
+    "message": "删除技能 Java",
+    "expected_intent": "edit_profile",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_project_update",
+    "message": "更新 Resume to Offer 项目，技术栈加 ChromaDB 和 BM25",
     "expected_intent": "edit_project",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_project_preview",
+    "message": "我做了一个 RAG 应用项目，负责 embedding 检索和 FastAPI 接口开发",
+    "expected_intent": "edit_project",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_work_experience_project",
+    "message": "我在云帆科技有限公司实习，负责 FastAPI 后端接口和 PostgreSQL 数据表开发",
+    "expected_intent": "edit_project",
+    "expected_route": "profile_project_edit_preview"
+  },
+  {
+    "id": "intent_mixed_profile_then_agent",
+    "message": "我的技能加上 FastAPI，然后帮我生成简历并推荐岗位",
+    "expected_intent": "edit_profile",
     "expected_route": "profile_project_edit_preview"
   },
   {
     "id": "intent_job_posting",
     "message": "JD：岗位职责包括开发 REST API，任职要求 Python、SQL、Docker",
+    "expected_intent": "analyze_job_posting",
+    "expected_route": "need_confirmation"
+  },
+  {
+    "id": "intent_job_description",
+    "message": "职位描述：负责 React 页面开发，要求 TypeScript 和组件化经验",
     "expected_intent": "analyze_job_posting",
     "expected_route": "need_confirmation"
   },

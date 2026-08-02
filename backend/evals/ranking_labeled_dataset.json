@@ -50,5 +50,83 @@
       }
     ],
     "relevant_job_ids": ["job-ai-001", "job-ai-002", "job-ai-003", "job-ai-004"]
+  },
+  {
+    "id": "ranking_frontend_react",
+    "request": {
+      "target_direction": "Frontend Developer",
+      "locations": ["北京", "上海", "深圳"],
+      "levels": ["初级", "实习", "应届"],
+      "role_families": ["Frontend"],
+      "top_k": 10
+    },
+    "profile": {
+      "location": "上海",
+      "skills": ["React", "TypeScript", "JavaScript", "CSS", "Vite"]
+    },
+    "projects": [
+      {
+        "id": "eval-project-frontend",
+        "category": "project",
+        "title": "Career Agent UI",
+        "role": "Frontend Developer",
+        "description": "Built React TypeScript UI for profile editing, resume versions, job matches, and skill gap views.",
+        "technologies": ["React", "TypeScript", "Vite", "CSS"],
+        "highlights": ["Implemented stateful workflow UI and reusable cards."]
+      }
+    ],
+    "relevant_job_ids": ["job-frontend-001", "job-frontend-002", "job-frontend-003", "job-frontend-004"]
+  },
+  {
+    "id": "ranking_data_analyst",
+    "request": {
+      "target_direction": "Data Analyst",
+      "locations": ["北京", "上海"],
+      "levels": ["初级", "实习", "应届"],
+      "role_families": ["Data Analyst"],
+      "top_k": 10
+    },
+    "profile": {
+      "location": "北京",
+      "skills": ["Python", "SQL", "Pandas", "Excel", "Tableau"]
+    },
+    "projects": [
+      {
+        "id": "eval-project-data",
+        "category": "project",
+        "title": "Sales Analytics Dashboard",
+        "role": "Data Analyst",
+        "description": "Analyzed sales data with Python, SQL, Pandas, and dashboard visualization.",
+        "technologies": ["Python", "SQL", "Pandas", "Tableau", "Excel"],
+        "highlights": ["Built metrics dashboard and reporting workflow."]
+      }
+    ],
+    "relevant_job_ids": ["job-data-001", "job-data-002", "job-data-003", "job-data-004"]
+  },
+  {
+    "id": "ranking_fullstack_react_fastapi",
+    "request": {
+      "target_direction": "Full Stack Developer",
+      "locations": ["北京", "上海", "深圳"],
+      "levels": ["初级", "应届", "校招"],
+      "role_families": ["Full Stack"],
+      "top_k": 10
+    },
+    "profile": {
+      "location": "深圳",
+      "skills": ["React", "TypeScript", "Python", "FastAPI", "PostgreSQL"]
+    },
+    "projects": [
+      {
+        "id": "eval-project-fullstack",
+        "category": "project",
+        "title": "Resume to Offer",
+        "role": "Full Stack Developer",
+        "description": "Built React TypeScript frontend and FastAPI PostgreSQL backend for an AI career planning workflow.",
+        "technologies": ["React", "TypeScript", "FastAPI", "PostgreSQL"],
+        "highlights": ["Implemented full-stack workflow from profile editing to job matching."]
+      }
+    ],
+    "relevant_job_ids": ["job-fullstack-001", "job-fullstack-002", "job-fullstack-003", "job-fullstack-004"]
   }
 ]

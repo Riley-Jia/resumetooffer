@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.agent_orchestrator import run_career_agent
@@ -15,11 +16,17 @@ from app.job_matching import match_jobs
 from app.job_seed import seed_jobs
 from app.model_config import configured_models
 from app.models import (
+    AgentRunEventModel,
+    AgentStepEventModel,
     CareerDirectionsModel,
     GeneratedResumeModel,
     JobModel,
+    ModelCallEventModel,
+    PartialRerunEventModel,
     ProfileModel,
     ProjectModel,
+    RetrievalRankingEventModel,
+    TelemetryEventModel,
 )
 from app.profile_project_editing import build_changes_for_patch, build_edit_preview, clean_patch
 from app.profiling import PROJECT_PROFILING_TOOL
@@ -50,6 +57,7 @@ from app.schemas import (
     SkillGapAnalysisResponse,
 )
 from app.skill_gap import run_skill_gap_analysis
+from app.telemetry import telemetry_context
 
 
 app = FastAPI(title="Resume to Offer API")
@@ -71,6 +79,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
+    os.environ.setdefault("TELEMETRY_DB_ENABLED", "1")
     create_tables()
     with SessionLocal() as db:
         seed_jobs(db)
@@ -84,6 +93,69 @@ def debug_config() -> dict[str, Any]:
         "openai_api_key_loaded": bool(api_key),
         "openai_api_key_prefix": api_key[:8] if api_key else "",
         "database_url_prefix": os.getenv("DATABASE_URL", "")[:48],
+    }
+
+
+@app.get("/telemetry/events")
+def list_telemetry_events(
+    event_type: str | None = None,
+    agent_run_id: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    query = db.query(TelemetryEventModel)
+    if event_type:
+        query = query.filter(TelemetryEventModel.event_type == event_type)
+    if agent_run_id:
+        query = query.filter(TelemetryEventModel.agent_run_id == agent_run_id)
+    rows = query.order_by(TelemetryEventModel.created_at.desc()).limit(min(max(limit, 1), 200)).all()
+    return [
+        {
+            "id": row.id,
+            "created_at": row.created_at.isoformat() if row.created_at else "",
+            "event_type": row.event_type,
+            "agent_run_id": row.agent_run_id,
+            "payload": row.payload,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/telemetry/summary")
+def telemetry_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
+    model_starts = db.query(ModelCallEventModel).filter(
+        ModelCallEventModel.event_type == "model_call_start"
+    ).count()
+    model_fallbacks = db.query(ModelCallEventModel).filter(
+        ModelCallEventModel.event_type == "model_call_fallback"
+    ).count()
+    partial_reuse = db.query(func.avg(PartialRerunEventModel.reuse_rate)).scalar()
+    retrieval = db.query(
+        func.avg(RetrievalRankingEventModel.bm25_candidate_count),
+        func.avg(RetrievalRankingEventModel.vector_candidate_count),
+        func.avg(RetrievalRankingEventModel.merged_candidate_count),
+        func.avg(RetrievalRankingEventModel.hybrid_overlap_count),
+    ).first()
+    top_events = (
+        db.query(TelemetryEventModel.event_type, func.count(TelemetryEventModel.id))
+        .group_by(TelemetryEventModel.event_type)
+        .order_by(func.count(TelemetryEventModel.id).desc())
+        .all()
+    )
+    return {
+        "agent_runs": db.query(AgentRunEventModel).count(),
+        "task_steps": db.query(AgentStepEventModel).count(),
+        "model_calls": model_starts,
+        "model_fallbacks": model_fallbacks,
+        "fallback_rate": model_fallbacks / model_starts if model_starts else 0.0,
+        "partial_rerun_events": db.query(PartialRerunEventModel).count(),
+        "partial_rerun_reuse_rate": float(partial_reuse or 0.0),
+        "retrieval_events": db.query(RetrievalRankingEventModel).count(),
+        "avg_bm25_candidates": float(retrieval[0] or 0.0) if retrieval else 0.0,
+        "avg_vector_candidates": float(retrieval[1] or 0.0) if retrieval else 0.0,
+        "avg_hybrid_candidates": float(retrieval[2] or 0.0) if retrieval else 0.0,
+        "avg_hybrid_overlap": float(retrieval[3] or 0.0) if retrieval else 0.0,
+        "event_counts": {event: count for event, count in top_events},
     }
 
 
@@ -209,7 +281,9 @@ def run_agent(
     request: CareerAgentRequest,
     db: Session = Depends(get_db),
 ) -> CareerAgentResponse:
-    return run_career_agent(request, db)
+    agent_run_id = str(uuid4())
+    with telemetry_context(agent_run_id):
+        return run_career_agent(request, db, agent_run_id=agent_run_id)
 
 
 @app.post("/input/route")
@@ -218,11 +292,12 @@ def route_input(
     db: Session = Depends(get_db),
 ) -> InputRouterResponse:
     profile_projects = get_profile_projects(db)
-    return route_user_input(
-        request.message,
-        profile_projects.profile,
-        profile_projects.projects,
-    )
+    with telemetry_context(str(uuid4())):
+        return route_user_input(
+            request.message,
+            profile_projects.profile,
+            profile_projects.projects,
+        )
 
 
 @app.get("/profile-projects")
@@ -372,13 +447,14 @@ def generate_job_matches(
     latest_resume = resume_query.order_by(GeneratedResumeModel.created_at.desc()).first()
     resume_data = resume_from_model(latest_resume).model_dump() if latest_resume else None
 
-    return match_jobs(
-        profile_projects.profile,
-        profile_projects.projects,
-        resume_data,
-        [job_from_model(job) for job in jobs],
-        request,
-    )
+    with telemetry_context(str(uuid4())):
+        return match_jobs(
+            profile_projects.profile,
+            profile_projects.projects,
+            resume_data,
+            [job_from_model(job) for job in jobs],
+            request,
+        )
 
 
 @app.post("/skill-gap/analyze")
@@ -387,11 +463,12 @@ def analyze_skill_gap(
     db: Session = Depends(get_db),
 ) -> SkillGapAnalysisResponse:
     profile_projects = get_profile_projects(db)
-    return run_skill_gap_analysis(
-        request,
-        profile_projects.profile,
-        profile_projects.projects,
-    )
+    with telemetry_context(str(uuid4())):
+        return run_skill_gap_analysis(
+            request,
+            profile_projects.profile,
+            profile_projects.projects,
+        )
 
 
 @app.get("/profile")

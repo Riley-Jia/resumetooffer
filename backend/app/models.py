@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -138,3 +138,98 @@ class AgentStateModel(Base):
     last_agent_run_id: Mapped[str] = mapped_column(String(36), default="")
     last_target_direction: Mapped[str] = mapped_column(String(160), default="")
     project_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class TelemetryEventModel(Base):
+    __tablename__ = "telemetry_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class AgentRunEventModel(Base):
+    __tablename__ = "agent_run_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    profile_id: Mapped[int] = mapped_column(Integer, index=True, default=1)
+    target_direction: Mapped[str] = mapped_column(String(160), default="")
+    selected_tools: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    reused_step_count: Mapped[int] = mapped_column(Integer, default=0)
+    rerun_step_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_feedback_rerun: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    latest_resume_id: Mapped[str] = mapped_column(String(36), default="")
+    latest_job_match_count: Mapped[int] = mapped_column(Integer, default=0)
+    gap_severity: Mapped[str] = mapped_column(String(32), default="")
+
+
+class AgentStepEventModel(Base):
+    __tablename__ = "agent_step_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    step_id: Mapped[str] = mapped_column(String(80), index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), default="")
+    depends_on: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(String(32), default="", index=True)
+    rerun_policy: Mapped[str] = mapped_column(String(128), default="")
+    input_refs: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    output_refs: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    is_reused: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_rerun: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class PartialRerunEventModel(Base):
+    __tablename__ = "partial_rerun_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    feedback_text: Mapped[str] = mapped_column(Text, default="")
+    changed_preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
+    reused_steps: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    rerun_steps: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    saved_step_count: Mapped[int] = mapped_column(Integer, default=0)
+    reuse_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0)
+
+
+class RetrievalRankingEventModel(Base):
+    __tablename__ = "retrieval_ranking_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    target_direction: Mapped[str] = mapped_column(String(160), default="", index=True)
+    top_k: Mapped[int] = mapped_column(Integer, default=10)
+    metadata_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    bm25_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    merged_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    hybrid_overlap_count: Mapped[int] = mapped_column(Integer, default=0)
+    llm_rerank_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    top_matches: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+
+
+class ModelCallEventModel(Base):
+    __tablename__ = "model_call_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    agent_run_id: Mapped[str] = mapped_column(String(36), default="", index=True)
+    task: Mapped[str] = mapped_column(String(128), index=True)
+    model: Mapped[str] = mapped_column(String(128), default="", index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fallback: Mapped[str] = mapped_column(String(128), default="")
+    error_type: Mapped[str] = mapped_column(String(128), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost: Mapped[float | None] = mapped_column(Numeric(12, 6), nullable=True)

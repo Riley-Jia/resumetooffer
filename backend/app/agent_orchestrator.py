@@ -47,6 +47,7 @@ from app.schemas import (
     WorkflowStepReuse,
 )
 from app.skill_gap import run_skill_gap_analysis
+from app.telemetry import log_event
 
 
 DEFAULT_PROFILE_ID = 1
@@ -746,7 +747,9 @@ def save_generated_resume(db: Session, generated_resume: GeneratedResume) -> Gen
 def run_career_agent(
     request: CareerAgentRequest,
     db: Session,
+    agent_run_id: str | None = None,
 ) -> CareerAgentResponse:
+    agent_run_id = agent_run_id or str(uuid4())
     steps: list[AgentExecutionStep] = []
     previous_state = get_agent_state(db)
     draft = parse_agent_goal(request.message)
@@ -983,7 +986,6 @@ def run_career_agent(
             )
         )
 
-    agent_run_id = str(uuid4())
     rerun_tools = [
         name
         for name, enabled in [
@@ -1079,6 +1081,52 @@ def run_career_agent(
         skill_gap=skill_gap,
         state=current_state,
     )
+    selected_tools = [
+        step.step_id
+        for step in task_plan.steps
+        if step.step_id != "goal_understanding" and step.status == "completed"
+    ]
+    log_event(
+        "agent_run_summary",
+        agent_run_id=agent_run_id,
+        profile_id=DEFAULT_PROFILE_ID,
+        target_direction=target_direction,
+        selected_tools=selected_tools,
+        step_count=len(task_plan.steps),
+        reused_step_count=len(reused_steps),
+        rerun_step_count=len(rerun_steps),
+        is_feedback_rerun=is_feedback_rerun,
+        latest_resume_id=latest_resume_id,
+        latest_job_match_count=len(latest_job_match_ids),
+        gap_severity=latest_gap_result.gap_severity,
+    )
+    for step in task_plan.steps:
+        log_event(
+            "task_step_trace",
+            agent_run_id=agent_run_id,
+            step_id=step.step_id,
+            tool_name=step.tool_name,
+            depends_on=step.depends_on,
+            status=step.status,
+            rerun_policy=step.rerun_policy,
+            input_refs=step.input_refs,
+            output_refs=step.output_refs,
+            is_reused=any(reused.step_id == step.step_id for reused in reused_steps),
+            is_rerun=any(rerun.step_id == step.step_id for rerun in rerun_steps),
+        )
+    if is_feedback_rerun:
+        log_event(
+            "partial_rerun_event",
+            agent_run_id=agent_run_id,
+            feedback_text=request.message,
+            changed_preferences=preference.model_dump(mode="json"),
+            reused_steps=[step.step_id for step in reused_steps],
+            rerun_steps=[step.step_id for step in rerun_steps],
+            saved_step_count=len(reused_steps),
+            reuse_rate=len(reused_steps) / (len(reused_steps) + len(rerun_steps))
+            if reused_steps or rerun_steps
+            else 0.0,
+        )
     db.add(
         AgentRunModel(
             id=agent_run_id,

@@ -6,10 +6,39 @@
     "expected_tools": ["resume_generation"]
   },
   {
+    "id": "planner_ai_resume_only",
+    "message": "生成 AI Application Developer 方向简历",
+    "expected_target_direction": "AI Application Developer",
+    "expected_tools": ["resume_generation"]
+  },
+  {
+    "id": "planner_jobs_only",
+    "message": "请帮我推荐上海 AI Application 岗位",
+    "expected_target_direction": "AI Application Developer",
+    "expected_tools": ["job_ranking"]
+  },
+  {
     "id": "planner_jobs_gap_plan",
     "message": "我想投北京初级后端岗位，推荐岗位、分析差距并给我学习计划",
     "expected_target_direction": "Backend Developer",
     "expected_tools": ["job_ranking", "skill_gap_analysis", "next_step_plan"]
+  },
+  {
+    "id": "planner_gap_only",
+    "message": "分析后端岗位差距",
+    "expected_target_direction": "Backend Developer",
+    "expected_tools": ["job_ranking", "skill_gap_analysis", "next_step_plan"]
+  },
+  {
+    "id": "planner_next_step_only",
+    "message": "帮我制定后端学习计划",
+    "expected_target_direction": "Backend Developer",
+    "expected_tools": ["next_step_plan"]
+  },
+  {
+    "id": "planner_career_direction",
+    "message": "请给我职业方向推荐",
+    "expected_tools": ["career_direction"]
   },
   {
     "id": "planner_project_preview",
@@ -22,5 +51,10 @@
     "feedback_rerun": true,
     "expected_target_direction": "Backend Developer",
     "expected_tools": ["job_ranking", "skill_gap_analysis", "next_step_plan"]
+  },
+  {
+    "id": "planner_full_workflow_default",
+    "message": "我想找工作，帮我规划一下",
+    "expected_tools": ["career_direction", "resume_generation", "job_ranking", "skill_gap_analysis", "next_step_plan"]
   }
 ]

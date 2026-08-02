@@ -248,6 +248,121 @@ curl -X POST http://localhost:8000/agent/run \
   -d '{"message":"帮我面向后端开发岗位优化简历，并分析还缺什么技能"}'
 ```
 
+## Agent 评估 / Agent Evaluation Harness
+
+评估脚本位于 `backend/evals/evaluate.py`，用于检查 intent routing、planner、tool trace 和 job ranking 指标。默认会把 JSON report 写入 `backend/evals/reports/`，该目录已加入 `.gitignore`。
+
+The evaluation script is in `backend/evals/evaluate.py`. It checks intent routing, planner output, tool traces, and job ranking metrics. JSON reports are written to `backend/evals/reports/` by default, and that directory is ignored by Git.
+
+离线评估不调用 OpenAI API，适合本地快速回归和 CI：
+
+Offline eval does not call the OpenAI API, so it is suitable for fast local regression checks and CI:
+
+```bash
+cd backend
+JOB_CHROMA_PERSIST_DIR=/tmp/resumetooffer_eval_chroma \
+  .venv/bin/python -m evals.evaluate --mode offline
+```
+
+Live 评估会调用真实模型。先把 API key 放到 `backend/.env`：
+
+Live eval calls the real model. Put your API key in `backend/.env` first:
+
+```bash
+OPENAI_API_KEY=your_openai_api_key
+```
+
+然后运行：
+
+Then run:
+
+```bash
+cd backend
+set -a
+source .env
+set +a
+JOB_CHROMA_PERSIST_DIR=/tmp/resumetooffer_eval_chroma \
+  .venv/bin/python -m evals.evaluate --mode live
+```
+
+也可以直接在命令前传入 API key：
+
+You can also pass the API key inline:
+
+```bash
+cd backend
+OPENAI_API_KEY="your_openai_api_key" \
+JOB_CHROMA_PERSIST_DIR=/tmp/resumetooffer_eval_chroma \
+  .venv/bin/python -m evals.evaluate --mode live
+```
+
+如需指定 report 文件名：
+
+To choose the report path explicitly:
+
+```bash
+cd backend
+JOB_CHROMA_PERSIST_DIR=/tmp/resumetooffer_eval_chroma \
+  .venv/bin/python -m evals.evaluate --mode offline \
+  --output evals/reports/offline_eval_report.json
+```
+
+常用参数：
+
+Common options:
+
+- `--mode offline|live`: 选择离线确定性评估或真实模型评估 / choose deterministic offline eval or real-model live eval
+- `--output evals/reports/<file>.json`: 指定 JSON report 输出路径 / choose the JSON report path
+- `--json`: 同时在终端输出完整 JSON / also print full JSON to the terminal
+- `--cases`: 打印逐 case 明细 / print per-case details
+
+## Telemetry 数据库 / Telemetry Database
+
+FastAPI 服务启动时会启用数据库埋点，将 `telemetry_event` 同时写入 PostgreSQL。原始事件统一保存在 `telemetry_events`，常用事件会同步写入明细表：
+
+The FastAPI server enables database telemetry on startup. `telemetry_event` logs are also persisted to PostgreSQL. Raw events are stored in `telemetry_events`, and common events are mirrored into typed tables:
+
+- `agent_run_events`: Agent run 摘要 / Agent run summaries
+- `agent_step_events`: TaskPlan step 轨迹 / TaskPlan step traces
+- `partial_rerun_events`: 局部重跑事件 / partial rerun events
+- `retrieval_ranking_events`: 检索排序事件 / retrieval and ranking events
+- `model_call_events`: 模型调用、失败和 fallback / model calls, failures, and fallbacks
+
+查看汇总：
+
+View summary:
+
+```bash
+curl http://localhost:8000/telemetry/summary
+```
+
+查看最近事件：
+
+View recent events:
+
+```bash
+curl 'http://localhost:8000/telemetry/events?limit=20'
+curl 'http://localhost:8000/telemetry/events?event_type=retrieval_ranking_trace&limit=10'
+```
+
+常用 SQL：
+
+Useful SQL:
+
+```sql
+SELECT event_type, COUNT(*)
+FROM telemetry_events
+GROUP BY event_type
+ORDER BY COUNT(*) DESC;
+```
+
+```sql
+SELECT
+  COUNT(*) FILTER (WHERE event_type = 'model_call_fallback')::float
+  / NULLIF(COUNT(*) FILTER (WHERE event_type = 'model_call_start'), 0) AS fallback_rate
+FROM model_call_events;
+```
+
 ## 岗位匹配逻辑 / Job Matching Logic
 
 后端启动时会从 `backend/data/jobs_seed.json` 向 PostgreSQL 写入 100 条国内初级 IT 岗位数据。匹配流程包括：

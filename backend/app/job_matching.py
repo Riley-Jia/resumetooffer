@@ -16,6 +16,7 @@ from app.language import detect_output_language, language_instruction
 from app.model_config import JOB_MATCHING_MODEL
 from app.model_logging import invoke_model_with_logging, log_model_fallback
 from app.schemas import Job, JobMatchRequest, JobMatchResponse, JobMatchResult, Profile, Project
+from app.telemetry import log_event
 
 
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
@@ -711,6 +712,37 @@ def match_jobs(
     final = sorted([*llm_ranked, *remaining], key=lambda item: item.final_score, reverse=True)
 
     top_k = max(1, min(request.top_k, 25))
+    bm25_ids = {hit.job_id for hit in bm25_hits}
+    vector_ids = {hit.job_id for hit in vector_hits}
+    log_event(
+        "retrieval_ranking_trace",
+        target_direction=request.target_direction,
+        top_k=top_k,
+        metadata_candidate_count=len(filtered_jobs),
+        bm25_candidate_count=len(bm25_hits),
+        vector_candidate_count=len(vector_hits),
+        merged_candidate_count=len(candidates),
+        hybrid_overlap_count=len(bm25_ids & vector_ids),
+        llm_rerank_candidate_count=llm_count,
+        top_matches=[
+            {
+                "rank": index,
+                "job_id": match.job.id,
+                "final_score": match.final_score,
+                "rule_score": match.rule_score,
+                "llm_score": match.llm_score,
+                "bm25_score": match.retrieval_source_scores.get("bm25", 0.0),
+                "vector_score": max(
+                    match.retrieval_source_scores.get("chroma", 0.0),
+                    match.retrieval_source_scores.get("local_vector", 0.0),
+                ),
+                "fusion_score": match.retrieval_source_scores.get("fusion", 0.0),
+                "matched_skill_count": len(match.matched_skills),
+                "missing_skill_count": len(match.missing_skills),
+            }
+            for index, match in enumerate(final[:top_k], start=1)
+        ],
+    )
     return JobMatchResponse(
         matches=final[:top_k],
         metadata_filter=metadata,
