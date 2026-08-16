@@ -1,11 +1,11 @@
-from app.agent_orchestrator import (
+from app.agent.planner import (
     AgentPlanDraft,
     canonicalize_goal,
     fallback_goal,
     force_partial_rerun_for_feedback,
     message_updates_preferences,
-    reused_steps_for_partial_rerun,
 )
+from app.agent.scheduler import reused_steps_for_partial_rerun
 from app.schemas import AgentState, GeneratedResume, UserPreference
 
 

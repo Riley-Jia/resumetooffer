@@ -16,7 +16,7 @@ REPO_DIR = BACKEND_DIR.parent
 sys.path.insert(0, str(BACKEND_DIR))
 os.environ.setdefault("JOB_CHROMA_PERSIST_DIR", "/tmp/resumetooffer_eval_chroma")
 
-from app.agent_orchestrator import (  # noqa: E402
+from app.agent.planner import (  # noqa: E402
     canonicalize_goal,
     fallback_goal,
     force_partial_rerun_for_feedback,
