@@ -345,6 +345,31 @@ curl 'http://localhost:8000/telemetry/events?limit=20'
 curl 'http://localhost:8000/telemetry/events?event_type=retrieval_ranking_trace&limit=10'
 ```
 
+用 eval 测试集回放埋点数据：
+
+Replay eval cases into telemetry tables:
+
+```bash
+cd backend
+DATABASE_URL=postgresql+psycopg://resume_user:resume_password@localhost:5432/resumetooffer \
+  .venv/bin/python -m evals.seed_telemetry --mode offline --repeat 3
+```
+
+如果需要填充真实模型调用表，使用 live 模式：
+
+Use live mode to populate real model call events:
+
+```bash
+cd backend
+set -a
+source .env
+set +a
+HTTPS_PROXY=http://127.0.0.1:7897 \
+HTTP_PROXY=http://127.0.0.1:7897 \
+DATABASE_URL=postgresql+psycopg://resume_user:resume_password@localhost:5432/resumetooffer \
+  .venv/bin/python -m evals.seed_telemetry --mode live --repeat 1
+```
+
 常用 SQL：
 
 Useful SQL:

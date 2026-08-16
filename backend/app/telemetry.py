@@ -139,7 +139,7 @@ def _write_database_event(payload: dict[str, Any]) -> None:
                 )
             db.commit()
     except Exception as error:
-        logger.debug("telemetry_db_write_failed error=%s", error)
+        logger.warning("telemetry_db_write_failed error=%s", error)
 
 
 def log_event(event_type: str, **fields: Any) -> None:
